@@ -19,6 +19,7 @@ from task1 import (
     trace_boundary,
 )
 from task2 import bresenham_line, draw_bresenham, draw_wu, wu_line
+from task3 import draw_gradient_triangle
 
 if sys.platform == "win32":
     try:
@@ -44,6 +45,7 @@ MODES = (
     ("boundary", "1в. Обход границы"),
     ("line_bresenham", "2. Отрезок Брезенхема"),
     ("line_wu", "2. Отрезок Ву"),
+    ("triangle", "3. Градиент треугольника"),
 )
 
 LINE_MODES = ("line_bresenham", "line_wu")
@@ -72,6 +74,9 @@ class App:
         self.stroke_start: Point | None = None
         self.line_anchor: Point | None = None
         self.line_end: Point | None = None
+        self.tri_points: list[Point] = []
+        self.tri_preview: Point | None = None
+        self.vertex_colors: list[Color] = [(220, 40, 40), (40, 180, 50), (40, 70, 210)]
         self.erasing = False
         self.photo: ImageTk.PhotoImage | None = None
         self.preview_photo: ImageTk.PhotoImage | None = None
@@ -99,6 +104,7 @@ class App:
 
         self._build_modes(panel)
         self._build_colors(panel)
+        self._build_vertices(panel)
         self._build_pattern(panel)
         self._build_image_tools(panel)
 
@@ -162,6 +168,19 @@ class App:
         self.border_swatch = self._color_row(box, "Граница", self.border_color, self._pick_border)
         self.fill_swatch = self._color_row(box, "Заливка", self.fill_color, self._pick_fill)
 
+    def _build_vertices(self, panel: ttk.Frame) -> None:
+        box = ttk.LabelFrame(panel, text="Вершины треугольника (3)", padding=6)
+        box.pack(fill="x", pady=(8, 0))
+        self.vertex_swatches: list[tk.Label] = []
+        for index in range(3):
+            swatch = self._color_row(
+                box,
+                f"Вершина {index + 1}",
+                self.vertex_colors[index],
+                lambda i=index: self._pick_vertex(i),
+            )
+            self.vertex_swatches.append(swatch)
+
     def _color_row(self, parent: ttk.Frame, title: str, color: Color, command) -> tk.Label:
         row = ttk.Frame(parent)
         row.pack(fill="x", pady=2)
@@ -221,6 +240,8 @@ class App:
     def _on_mode(self) -> None:
         self.line_anchor = None
         self.line_end = None
+        self.tri_points.clear()
+        self.tri_preview = None
         self.stroke_start = None
         self.erasing = False
         mode = self.mode.get()
@@ -231,6 +252,7 @@ class App:
             "boundary": "Щёлкните по границе. Точки записываются по порядку обхода.",
             "line_bresenham": "Протяните отрезок левой кнопкой. Цвет берётся из поля «Граница».",
             "line_wu": "Протяните отрезок левой кнопкой. Цвет берётся из поля «Граница».",
+            "triangle": "Три щелчка — вершины. Цвета задаются полями «Вершина 1», «Вершина 2» и «Вершина 3».",
         }
         self.status.set(hints[mode])
         self._refresh()
@@ -238,6 +260,7 @@ class App:
     def _on_move(self, event: tk.Event) -> None:
         point = self._image_xy(event, clamp=False)
         self.coords.set("" if point is None else f"x={point[0]}  y={point[1]}")
+        self._move_triangle_preview(event)
 
     def _on_wheel(self, event: tk.Event) -> None:
         self.canvas.yview_scroll(int(-event.delta / 120), "units")
@@ -254,6 +277,8 @@ class App:
             self.status.set("Протяните отрезок и отпустите кнопку.")
             self._refresh()
             return
+        if mode == "triangle":
+            return
         if mode != "draw":
             return
         point = self._image_xy(event, clamp=True)
@@ -266,6 +291,9 @@ class App:
         self.stroke_start = point
 
     def _on_left_drag(self, event: tk.Event) -> None:
+        if self.mode.get() == "triangle":
+            self._move_triangle_preview(event)
+            return
         if self.mode.get() in LINE_MODES:
             if self.line_anchor is None:
                 return
@@ -294,6 +322,20 @@ class App:
                 self._draw_segment(start, point)
             else:
                 self._refresh()
+            return
+        if mode == "triangle":
+            point = self._image_xy(event, clamp=True)
+            self.tri_preview = None
+            if point is None:
+                self._refresh()
+                return
+            self.tri_points.append(point)
+            if len(self.tri_points) == 3:
+                self._draw_triangle()
+                return
+            left = 3 - len(self.tri_points)
+            self.status.set(f"Вершина {len(self.tri_points)}: {point}. Осталось указать: {left}.")
+            self._refresh()
             return
         point = self._image_xy(event, clamp=False)
         self.stroke_start = None
@@ -346,6 +388,83 @@ class App:
             self._show_plots([(x, y, 1.0) for x, y in points], start, end, "Брезенхем")
             self.status.set(f"Алгоритм Брезенхема: {len(points)} пикселов, {start} — {end}.")
         self._refresh()
+
+    def _draw_triangle(self) -> None:
+        points = list(self.tri_points)
+        colors = [self.vertex_colors[0], self.vertex_colors[1], self.vertex_colors[2]]
+        self.tri_points.clear()
+        self.tri_preview = None
+        self.contour = None
+        count = draw_gradient_triangle(
+            self.image,
+            points[0],
+            colors[0],
+            points[1],
+            colors[1],
+            points[2],
+            colors[2],
+        )
+        self._show_triangle(points, colors, count)
+        self.status.set(f"Треугольник: {count} пикселов. Вершины {points[0]}, {points[1]}, {points[2]}.")
+        self._refresh()
+
+    def _show_triangle(self, points: list[Point], colors: list[Color], count: int) -> None:
+        self.points_text.delete("1.0", "end")
+        self.points_text.insert(
+            "end",
+            f"# Треугольник\n# Пикселов: {count}\n# вершина  x  y  r  g  b\n",
+        )
+        for index, ((x, y), (red, green, blue)) in enumerate(zip(points, colors), start=1):
+            self.points_text.insert(
+                "end",
+                f"{index:5d}  {x:5d}  {y:5d}  {red:3d} {green:3d} {blue:3d}\n",
+            )
+
+    def _move_triangle_preview(self, event: tk.Event) -> None:
+        if self.mode.get() != "triangle" or not self.tri_points:
+            return
+        preview = self._image_xy(event, clamp=True)
+        if preview is None or preview == self.tri_preview:
+            return
+        self.tri_preview = preview
+        self._refresh()
+
+    def _paint_triangle_preview(self, image: Image.Image) -> None:
+        points = self.tri_points
+        colors = self.vertex_colors
+        if len(points) >= 2 and self.tri_preview is not None:
+            draw_gradient_triangle(
+                image,
+                points[0],
+                colors[0],
+                points[1],
+                colors[1],
+                self.tri_preview,
+                colors[2],
+            )
+        elif len(points) == 2:
+            draw_bresenham(
+                image,
+                points[0][0],
+                points[0][1],
+                points[1][0],
+                points[1][1],
+                colors[0],
+            )
+        elif len(points) == 1 and self.tri_preview is not None:
+            draw_bresenham(
+                image,
+                points[0][0],
+                points[0][1],
+                self.tri_preview[0],
+                self.tri_preview[1],
+                colors[0],
+            )
+        marks = list(zip(points, colors))
+        if self.tri_preview is not None and len(points) < 3:
+            marks.append((self.tri_preview, colors[len(points)]))
+        for point, color in marks:
+            _mark_vertex(image, point, color)
 
     def _show_plots(
         self,
@@ -479,6 +598,15 @@ class App:
             self.fill_color = chosen
             self.fill_swatch.configure(bg=hex_color(chosen))
 
+    def _pick_vertex(self, index: int) -> None:
+        chosen = self._ask_color(self.vertex_colors[index])
+        if chosen is None:
+            return
+        self.vertex_colors[index] = chosen
+        self.vertex_swatches[index].configure(bg=hex_color(chosen))
+        if self.tri_points:
+            self._refresh()
+
     def _ask_color(self, current: Color) -> Color | None:
         rgb, _hex = colorchooser.askcolor(color=hex_color(current), parent=self.root)
         if rgb is None:
@@ -560,6 +688,10 @@ class App:
     def _replace_canvas(self, image: Image.Image, name: str) -> None:
         self.image = image
         self.contour = None
+        self.tri_points.clear()
+        self.tri_preview = None
+        self.line_anchor = None
+        self.line_end = None
         self._clear_points_view()
         self.photo = None
         self._fit_viewport()
@@ -575,6 +707,10 @@ class App:
     def _clear(self) -> None:
         self.image = Image.new("RGB", CANVAS_SIZE, WHITE)
         self.contour = None
+        self.tri_points.clear()
+        self.tri_preview = None
+        self.line_anchor = None
+        self.line_end = None
         self.photo = None
         self._clear_points_view()
         self._fit_viewport()
@@ -612,16 +748,22 @@ class App:
 
     def _compose(self) -> Image.Image:
         shown = render_contour(self.image, self.contour) if self.contour else self.image
-        if self.line_anchor is None or self.line_end is None:
+        needs_line = self.line_anchor is not None and self.line_end is not None
+        needs_triangle = self.mode.get() == "triangle" and bool(self.tri_points)
+        if not needs_line and not needs_triangle:
             return shown
         shown = shown.copy()
-        x0, y0 = self.line_anchor
-        x1, y1 = self.line_end
-        if self.mode.get() == "line_wu":
-            draw_wu(shown, x0, y0, x1, y1, self.border_color)
-        else:
-            draw_bresenham(shown, x0, y0, x1, y1, self.border_color)
+        if needs_line and self.line_anchor is not None and self.line_end is not None:
+            x0, y0 = self.line_anchor
+            x1, y1 = self.line_end
+            if self.mode.get() == "line_wu":
+                draw_wu(shown, x0, y0, x1, y1, self.border_color)
+            else:
+                draw_bresenham(shown, x0, y0, x1, y1, self.border_color)
+        if needs_triangle:
+            self._paint_triangle_preview(shown)
         return shown
+
 
     def _fit_viewport(self) -> None:
         width, height = self.image.size
@@ -662,6 +804,21 @@ class App:
         if 0 <= x < width and 0 <= y < height:
             return x, y
         return None
+
+
+def _mark_vertex(image: Image.Image, point: Point, color: Color) -> None:
+    pixels = image.load()
+    width, height = image.size
+    x, y = point
+    for dy in range(-2, 3):
+        for dx in range(-2, 3):
+            if max(abs(dx), abs(dy)) != 2:
+                continue
+            mx, my = x + dx, y + dy
+            if 0 <= mx < width and 0 <= my < height:
+                pixels[mx, my] = (0, 0, 0)
+    if 0 <= x < width and 0 <= y < height:
+        pixels[x, y] = color
 
 
 def main() -> None:
