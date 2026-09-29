@@ -18,6 +18,7 @@ from task1 import (
     span_fill,
     trace_boundary,
 )
+from task2 import bresenham_line, draw_bresenham, draw_wu, wu_line
 
 if sys.platform == "win32":
     try:
@@ -41,7 +42,11 @@ MODES = (
     ("fill_color", "1а. Заливка цветом"),
     ("fill_pattern", "1б. Заливка рисунком"),
     ("boundary", "1в. Обход границы"),
+    ("line_bresenham", "2. Отрезок Брезенхема"),
+    ("line_wu", "2. Отрезок Ву"),
 )
+
+LINE_MODES = ("line_bresenham", "line_wu")
 
 
 def hex_color(color: Color) -> str:
@@ -57,7 +62,7 @@ def load_rgb(path: str) -> Image.Image:
 class App:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.root.title("ЛР3 — заливка и выделение границы")
+        self.root.title("ЛР3 — растровые алгоритмы")
         self.image = Image.new("RGB", CANVAS_SIZE, WHITE)
         self.pattern: Image.Image | None = None
         self.pattern_name = ""
@@ -65,6 +70,8 @@ class App:
         self.border_color: Color = (0, 0, 0)
         self.fill_color: Color = (210, 40, 40)
         self.stroke_start: Point | None = None
+        self.line_anchor: Point | None = None
+        self.line_end: Point | None = None
         self.erasing = False
         self.photo: ImageTk.PhotoImage | None = None
         self.preview_photo: ImageTk.PhotoImage | None = None
@@ -114,7 +121,7 @@ class App:
         self.vbar.grid(row=0, column=1, sticky="ns")
         self.hbar.grid(row=1, column=0, sticky="ew")
 
-        points_box = ttk.LabelFrame(workspace, text="Точки границы в порядке обхода", padding=4)
+        points_box = ttk.LabelFrame(workspace, text="Список точек", padding=4)
         points_box.grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
         self.points_text = ScrolledText(
             points_box, height=7, font=("Consolas", 9), wrap="none"
@@ -212,13 +219,21 @@ class App:
         )
 
     def _on_mode(self) -> None:
+        self.line_anchor = None
+        self.line_end = None
+        self.stroke_start = None
+        self.erasing = False
+        mode = self.mode.get()
         hints = {
             "draw": "ЛКМ — граница области, ПКМ — стереть до белого.",
             "fill_color": "Щёлкните внутри области: это затравка заливки цветом.",
             "fill_pattern": "Щёлкните внутри области: заливка рисунком из файла.",
             "boundary": "Щёлкните по границе. Точки записываются по порядку обхода.",
+            "line_bresenham": "Протяните отрезок левой кнопкой. Цвет берётся из поля «Граница».",
+            "line_wu": "Протяните отрезок левой кнопкой. Цвет берётся из поля «Граница».",
         }
-        self.status.set(hints[self.mode.get()])
+        self.status.set(hints[mode])
+        self._refresh()
 
     def _on_move(self, event: tk.Event) -> None:
         point = self._image_xy(event, clamp=False)
@@ -228,7 +243,18 @@ class App:
         self.canvas.yview_scroll(int(-event.delta / 120), "units")
 
     def _on_left_down(self, event: tk.Event) -> None:
-        if self.mode.get() != "draw":
+        mode = self.mode.get()
+        if mode in LINE_MODES:
+            point = self._image_xy(event, clamp=True)
+            if point is None:
+                return
+            self.line_anchor = point
+            self.line_end = point
+            self.contour = None
+            self.status.set("Протяните отрезок и отпустите кнопку.")
+            self._refresh()
+            return
+        if mode != "draw":
             return
         point = self._image_xy(event, clamp=True)
         if point is None:
@@ -240,6 +266,15 @@ class App:
         self.stroke_start = point
 
     def _on_left_drag(self, event: tk.Event) -> None:
+        if self.mode.get() in LINE_MODES:
+            if self.line_anchor is None:
+                return
+            point = self._image_xy(event, clamp=True)
+            if point is None:
+                return
+            self.line_end = point
+            self._refresh()
+            return
         if self.mode.get() != "draw" or self.stroke_start is None or self.erasing:
             return
         point = self._image_xy(event, clamp=True)
@@ -250,6 +285,16 @@ class App:
 
     def _on_left_up(self, event: tk.Event) -> None:
         mode = self.mode.get()
+        if mode in LINE_MODES:
+            start = self.line_anchor
+            self.line_anchor = None
+            self.line_end = None
+            point = self._image_xy(event, clamp=True)
+            if start is not None and point is not None:
+                self._draw_segment(start, point)
+            else:
+                self._refresh()
+            return
         point = self._image_xy(event, clamp=False)
         self.stroke_start = None
         self.erasing = False
@@ -286,6 +331,46 @@ class App:
     def _on_stroke_end(self, _event: tk.Event) -> None:
         self.stroke_start = None
         self.erasing = False
+
+    def _draw_segment(self, start: Point, end: Point) -> None:
+        x0, y0 = start
+        x1, y1 = end
+        if self.mode.get() == "line_wu":
+            draw_wu(self.image, x0, y0, x1, y1, self.border_color)
+            plots = wu_line(x0, y0, x1, y1)
+            self._show_plots(plots, start, end, "Ву")
+            self.status.set(f"Алгоритм Ву: {len(plots)} пикселов, {start} — {end}.")
+        else:
+            points = bresenham_line(x0, y0, x1, y1)
+            draw_bresenham(self.image, x0, y0, x1, y1, self.border_color)
+            self._show_plots([(x, y, 1.0) for x, y in points], start, end, "Брезенхем")
+            self.status.set(f"Алгоритм Брезенхема: {len(points)} пикселов, {start} — {end}.")
+        self._refresh()
+
+    def _show_plots(
+        self,
+        plots: list[tuple[int, int, float]],
+        start: Point,
+        end: Point,
+        name: str,
+    ) -> None:
+        self.points_text.delete("1.0", "end")
+        header = (
+            f"# {name}\n"
+            f"# {start[0]} {start[1]} — {end[0]} {end[1]}\n"
+            f"# Пикселов: {len(plots)}\n"
+            "# номер  x  y  яркость\n"
+        )
+        self.points_text.insert("end", header)
+        shown = plots if len(plots) <= 8000 else plots[:8000]
+        body = "\n".join(
+            f"{index:5d}  {x:5d}  {y:5d}  {coverage:4.2f}"
+            for index, (x, y, coverage) in enumerate(shown, start=1)
+        )
+        if body:
+            self.points_text.insert("end", body + "\n")
+        if len(plots) > len(shown):
+            self.points_text.insert("end", f"# ... ещё {len(plots) - len(shown)} пикселов\n")
 
     def _paint_stroke(self, start: Point, end: Point, color: Color) -> None:
         draw_stroke(self.image, start[0], start[1], end[0], end[1], self._radius(), color)
@@ -526,9 +611,17 @@ class App:
         self.status.set(f"Список из {len(self.contour)} точек сохранён: {path}")
 
     def _compose(self) -> Image.Image:
-        if self.contour:
-            return render_contour(self.image, self.contour)
-        return self.image
+        shown = render_contour(self.image, self.contour) if self.contour else self.image
+        if self.line_anchor is None or self.line_end is None:
+            return shown
+        shown = shown.copy()
+        x0, y0 = self.line_anchor
+        x1, y1 = self.line_end
+        if self.mode.get() == "line_wu":
+            draw_wu(shown, x0, y0, x1, y1, self.border_color)
+        else:
+            draw_bresenham(shown, x0, y0, x1, y1, self.border_color)
+        return shown
 
     def _fit_viewport(self) -> None:
         width, height = self.image.size
